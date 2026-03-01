@@ -152,20 +152,20 @@ export function Dropzone() {
                         className="w-full flex-col flex gap-6"
                     >
                         {/* File Info Card */}
-                        <div className="glass-panel w-full p-6 flex flex-row items-center justify-between shadow-diffusion border-emerald-500/20 bg-white/90">
-                            <div className="flex items-center gap-4">
-                                <div className="w-14 h-14 rounded-xl bg-slate-100 flex items-center justify-center">
+                        <div className="glass-panel w-full p-4 sm:p-6 flex flex-col sm:flex-row items-center justify-between gap-4 shadow-diffusion border-emerald-500/20 bg-white/90">
+                            <div className="flex items-center gap-4 w-full sm:w-auto">
+                                <div className="w-12 h-12 sm:w-14 sm:h-14 rounded-xl bg-slate-100 flex items-center justify-center shrink-0">
                                     {renderIcon()}
                                 </div>
-                                <div>
-                                    <h4 className="text-lg font-bold text-slate-900 tracking-tight truncate max-w-[300px]">{file.name}</h4>
-                                    <p className="text-sm text-slate-500 font-medium">{formatBytes(file.size)} • {category.charAt(0).toUpperCase() + category.slice(1)}</p>
+                                <div className="min-w-0 flex-1">
+                                    <h4 className="text-base sm:text-lg font-bold text-slate-900 tracking-tight truncate max-w-[200px] sm:max-w-[300px]">{file.name}</h4>
+                                    <p className="text-xs sm:text-sm text-slate-500 font-medium">{formatBytes(file.size)} • {category.charAt(0).toUpperCase() + category.slice(1)}</p>
                                 </div>
                             </div>
 
                             <button
                                 onClick={resetAll}
-                                className="px-4 py-2 rounded-lg bg-slate-100 text-slate-600 font-semibold text-sm hover:bg-slate-200 transition-colors"
+                                className="w-full sm:w-auto px-4 py-2 rounded-lg bg-slate-100 text-slate-600 font-semibold text-sm hover:bg-slate-200 transition-colors"
                             >
                                 Changer
                             </button>
