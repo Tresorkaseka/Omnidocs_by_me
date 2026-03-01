@@ -66,14 +66,23 @@ export function getAvailableFormats(file: File): string[] {
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 import * as mammoth from 'mammoth';
 import * as pdfjs from 'pdfjs-dist';
-import { Document, Packer, Paragraph, TextRun } from 'docx';
+import { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, WidthType } from 'docx';
 // @ts-ignore
 import html2pdf from 'html2pdf.js';
 import { convert as convertHtmlToText } from 'html-to-text';
 
-// Set worker for pdfjs (using CDN for simplicity in Vite)
-// Set worker for pdfjs (using a more robust CDN URL or local path)
+// Set worker for pdfjs
 pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
+
+interface PDFSegment {
+    text: string;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    color?: string; // Hex color
+    page: number;
+}
 
 export async function convertDocumentLocally(file: File, targetFormat: string): Promise<Blob> {
     const extension = file.name.split('.').pop()?.toLowerCase();
@@ -82,20 +91,16 @@ export async function convertDocumentLocally(file: File, targetFormat: string): 
     const isDocx = file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' || extension === 'docx';
     const isPdf = file.type === 'application/pdf' || extension === 'pdf';
 
-    // Simulate heavy local processing
     await new Promise(resolve => setTimeout(resolve, 800));
 
-    // Case 1: Identity conversion
     if (targetFormat.toLowerCase() === extension || (targetFormat === 'JPG' && extension === 'jpeg')) {
         return file;
     }
 
-    // Case 2: Image Conversion (PNG/JPG/WEBP)
     if (isImage && ['PNG', 'JPG', 'WEBP'].includes(targetFormat)) {
         return await convertImageLocally(file, targetFormat);
     }
 
-    // Case 3: DOCX to PDF/TXT/MD (High Fidelity)
     if (isDocx) {
         try {
             const arrayBuffer = await file.arrayBuffer();
@@ -121,30 +126,27 @@ export async function convertDocumentLocally(file: File, targetFormat: string): 
         }
     }
 
-    // Case 4: PDF to DOCX/TXT
     if (isPdf) {
-        const text = await extractTextFromPdf(file);
         if (targetFormat === 'DOCX') {
-            return await createDocxFromText(text);
+            const segments = await extractRichTextFromPdf(file);
+            return await createRichDocxFromSegments(segments);
         }
         if (targetFormat === 'TXT') {
+            const segments = await extractRichTextFromPdf(file);
+            const text = segments.map(s => s.text).join(' ');
             return new Blob([text], { type: 'text/plain' });
         }
     }
 
-    // Case 5: Text to PDF (Standard)
     if (targetFormat === 'PDF' && isText) {
         const text = await file.text();
         return await createPdfFromText(text);
     }
 
-    // Fallback description
     const fallbackText = `OmniDocs Conversion\n` +
         `------------------\n` +
         `Source: ${file.name}\n` +
         `Target: ${targetFormat}\n\n` +
-        `Note: La conversion complexe de ${extension?.toUpperCase()} vers ${targetFormat} ` +
-        `sera enrichie dans la version Pro.\n` +
         `V1.5 supporte : Image -> Image, TXT/DOCX/PDF -> PDF/DOCX/TXT/MD (Haute Fidélité).`;
 
     return new Blob([fallbackText], { type: 'text/plain' });
@@ -159,7 +161,6 @@ async function createHighFidelityPdfFromHtml(html: string): Promise<Blob> {
     element.style.color = '#1a1a1a';
     element.style.backgroundColor = 'white';
 
-    // Add some basic styling to the extracted HTML to look like a real document
     const style = document.createElement('style');
     style.textContent = `
         p { margin-bottom: 1em; line-height: 1.5; }
@@ -182,76 +183,107 @@ async function createHighFidelityPdfFromHtml(html: string): Promise<Blob> {
     return await html2pdf().from(element).set(options).outputPdf('blob');
 }
 
-async function extractTextFromPdf(file: File): Promise<string> {
+async function extractRichTextFromPdf(file: File): Promise<PDFSegment[]> {
     try {
-        console.log("PDF extraction started...");
         const arrayBuffer = await file.arrayBuffer();
         const loadingTask = pdfjs.getDocument({ data: arrayBuffer });
         const pdf = await loadingTask.promise;
-        console.log(`PDF loaded. Pages: ${pdf.numPages}`);
-        let fullText = "";
+        const allSegments: PDFSegment[] = [];
 
         for (let i = 1; i <= pdf.numPages; i++) {
             const page = await pdf.getPage(i);
             const textContent = await page.getTextContent();
 
-            // Group items by their Y coordinate (transform[5])
-            const items = textContent.items as any[];
-            const lines: { [key: number]: any[] } = {};
-
-            items.forEach(item => {
-                // Guard against entries that are not TextItems (like TextMark)
+            textContent.items.forEach((item: any) => {
                 if (item && item.transform) {
-                    const y = Math.round(item.transform[5]);
-                    if (!lines[y]) lines[y] = [];
-                    lines[y].push(item);
+                    allSegments.push({
+                        text: item.str,
+                        x: item.transform[4],
+                        y: item.transform[5],
+                        width: item.width || 0,
+                        height: item.height || 0,
+                        color: '000000', // Default
+                        page: i
+                    });
                 }
             });
-
-            // Sort Y coordinates descending (PDF coordinate system starts at bottom)
-            const sortedY = Object.keys(lines).map(Number).sort((a, b) => b - a);
-
-            let pageText = "";
-            let lastY = -1;
-
-            sortedY.forEach(y => {
-                // Sort items in the same line by X coordinate
-                const lineItems = lines[y].sort((a, b) => a.transform[4] - b.transform[4]);
-                const lineStr = lineItems.map(item => item.str).join(" ");
-
-                // If the jump is significant, consider it a new paragraph
-                if (lastY !== -1 && Math.abs(lastY - y) > 20) {
-                    pageText += "\n";
-                }
-
-                pageText += lineStr + "\n";
-                lastY = y;
-            });
-
-            fullText += pageText + "\n\n";
         }
-        console.log("PDF extraction successful.");
-        return fullText;
+        return allSegments;
     } catch (err) {
-        console.error("CRITICAL PDF ERROR:", err);
-        throw new Error("Impossible de lire le contenu du PDF. Le fichier est peut-être protégé ou corrompu.");
+        console.error("PDF extraction error:", err);
+        throw new Error("Erreur d'extraction du PDF");
     }
 }
 
-async function createDocxFromText(text: string): Promise<Blob> {
+async function createRichDocxFromSegments(segments: PDFSegment[]): Promise<Blob> {
+    const pages: Record<number, PDFSegment[]> = {};
+    segments.forEach(s => {
+        if (!pages[s.page]) pages[s.page] = [];
+        pages[s.page].push(s);
+    });
+
+    const docChildren: any[] = [];
+
+    Object.keys(pages).sort((a, b) => Number(a) - Number(b)).forEach(pageNum => {
+        const pageSegments = pages[Number(pageNum)];
+        const lines: Record<number, PDFSegment[]> = {};
+
+        pageSegments.forEach(s => {
+            const y = Math.round(s.y);
+            if (!lines[y]) lines[y] = [];
+            lines[y].push(s);
+        });
+
+        const sortedY = Object.keys(lines).map(Number).sort((a, b) => b - a);
+
+        sortedY.forEach(y => {
+            const lineSegments = lines[y].sort((a, b) => a.x - b.x);
+            const isTable = lineSegments.length > 2 && checkHorizontalGaps(lineSegments);
+
+            if (isTable) {
+                const table = new Table({
+                    rows: [
+                        new TableRow({
+                            children: lineSegments.map(s =>
+                                new TableCell({
+                                    children: [new Paragraph({
+                                        children: [new TextRun({ text: s.text, color: s.color })]
+                                    })],
+                                })
+                            )
+                        })
+                    ],
+                    width: { size: 100, type: WidthType.PERCENTAGE }
+                });
+                docChildren.push(table);
+            } else {
+                const p = new Paragraph({
+                    children: lineSegments.map(s => new TextRun({
+                        text: s.text + " ",
+                        color: s.color
+                    })),
+                });
+                docChildren.push(p);
+            }
+        });
+    });
+
     const doc = new Document({
         sections: [{
             properties: {},
-            children: text.split('\n').map(line =>
-                new Paragraph({
-                    children: [new TextRun(line)],
-                })
-            ),
+            children: docChildren,
         }],
     });
 
-    const blob = await Packer.toBlob(doc);
-    return blob;
+    return await Packer.toBlob(doc);
+}
+
+function checkHorizontalGaps(segments: PDFSegment[]): boolean {
+    for (let i = 0; i < segments.length - 1; i++) {
+        const gap = segments[i + 1].x - (segments[i].x + segments[i].width);
+        if (gap > 30) return true;
+    }
+    return false;
 }
 
 async function createPdfFromText(text: string): Promise<Blob> {
@@ -261,12 +293,10 @@ async function createPdfFromText(text: string): Promise<Blob> {
     const lineHeight = 14;
     const margin = 50;
 
-    // Split text into lines (filtering non-ASCII characters to avoid pdf-lib errors)
     const rawLines = text.split('\n');
     const cleanLines: string[] = [];
     rawLines.forEach(line => {
         const cleaned = line.replace(/[^\x00-\x7F]/g, " ");
-        // Simple wrapping logic (80 chars max per line)
         for (let i = 0; i < cleaned.length; i += 80) {
             cleanLines.push(cleaned.slice(i, i + 80));
         }
