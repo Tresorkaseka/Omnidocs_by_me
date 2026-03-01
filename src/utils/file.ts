@@ -67,6 +67,9 @@ import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 import * as mammoth from 'mammoth';
 import * as pdfjs from 'pdfjs-dist';
 import { Document, Packer, Paragraph, TextRun } from 'docx';
+// @ts-ignore
+import html2pdf from 'html2pdf.js';
+import { convert as convertHtmlToText } from 'html-to-text';
 
 // Set worker for pdfjs (using CDN for simplicity in Vite)
 pdfjs.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.min.js`;
@@ -91,22 +94,29 @@ export async function convertDocumentLocally(file: File, targetFormat: string): 
         return await convertImageLocally(file, targetFormat);
     }
 
-    // Case 3: DOCX to PDF/TXT/MD
+    // Case 3: DOCX to PDF/TXT/MD (High Fidelity)
     if (isDocx) {
         try {
             const arrayBuffer = await file.arrayBuffer();
-            const result = await mammoth.extractRawText({ arrayBuffer });
-            const text = result.value;
+            const result = await mammoth.convertToHtml({ arrayBuffer });
+            const html = result.value;
 
             if (targetFormat === 'PDF') {
-                return await createPdfFromText(text);
+                return await createHighFidelityPdfFromHtml(html);
             }
             if (targetFormat === 'TXT' || targetFormat === 'MD') {
+                const text = convertHtmlToText(html, {
+                    wordwrap: 130,
+                    selectors: [
+                        { selector: 'a', options: { ignoreHref: true } },
+                        { selector: 'img', format: 'skip' }
+                    ]
+                });
                 return new Blob([text], { type: targetFormat === 'MD' ? 'text/markdown' : 'text/plain' });
             }
         } catch (err) {
             console.error("Mammoth error:", err);
-            throw new Error("Erreur lors de l'extraction du texte DOCX");
+            throw new Error("Erreur lors de la conversion du document Word");
         }
     }
 
@@ -121,7 +131,7 @@ export async function convertDocumentLocally(file: File, targetFormat: string): 
         }
     }
 
-    // Case 5: Text to PDF (Our main POC)
+    // Case 5: Text to PDF (Standard)
     if (targetFormat === 'PDF' && isText) {
         const text = await file.text();
         return await createPdfFromText(text);
@@ -134,9 +144,41 @@ export async function convertDocumentLocally(file: File, targetFormat: string): 
         `Target: ${targetFormat}\n\n` +
         `Note: La conversion complexe de ${extension?.toUpperCase()} vers ${targetFormat} ` +
         `sera enrichie dans la version Pro.\n` +
-        `V1.4 supporte : Image -> Image, TXT/DOCX/PDF -> PDF/DOCX/TXT/MD.`;
+        `V1.5 supporte : Image -> Image, TXT/DOCX/PDF -> PDF/DOCX/TXT/MD (Haute Fidélité).`;
 
     return new Blob([fallbackText], { type: 'text/plain' });
+}
+
+async function createHighFidelityPdfFromHtml(html: string): Promise<Blob> {
+    const element = document.createElement('div');
+    element.innerHTML = html;
+    element.style.padding = '40px';
+    element.style.fontFamily = 'Helvetica, Arial, sans-serif';
+    element.style.fontSize = '12pt';
+    element.style.color = '#1a1a1a';
+    element.style.backgroundColor = 'white';
+
+    // Add some basic styling to the extracted HTML to look like a real document
+    const style = document.createElement('style');
+    style.textContent = `
+        p { margin-bottom: 1em; line-height: 1.5; }
+        h1, h2, h3 { margin-top: 1.5em; margin-bottom: 0.5em; font-weight: bold; }
+        ul, ol { margin-left: 2em; margin-bottom: 1em; }
+        table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+        td, th { border: 1px solid #ccc; padding: 8px; }
+    `;
+    element.appendChild(style);
+
+    const options = {
+        margin: 10,
+        filename: 'converted.pdf',
+        image: { type: 'jpeg', quality: 0.98 },
+        html2canvas: { scale: 2, useCORS: true, letterRendering: true },
+        jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }
+    };
+
+    // @ts-ignore
+    return await html2pdf().from(element).set(options).outputPdf('blob');
 }
 
 async function extractTextFromPdf(file: File): Promise<string> {
@@ -148,7 +190,37 @@ async function extractTextFromPdf(file: File): Promise<string> {
     for (let i = 1; i <= pdf.numPages; i++) {
         const page = await pdf.getPage(i);
         const textContent = await page.getTextContent();
-        const pageText = textContent.items.map((item: any) => item.str).join(" ");
+
+        // Group items by their Y coordinate (transform[5])
+        const items = textContent.items as any[];
+        const lines: { [key: number]: any[] } = {};
+
+        items.forEach(item => {
+            const y = Math.round(item.transform[5]);
+            if (!lines[y]) lines[y] = [];
+            lines[y].push(item);
+        });
+
+        // Sort Y coordinates descending (PDF coordinate system starts at bottom)
+        const sortedY = Object.keys(lines).map(Number).sort((a, b) => b - a);
+
+        let pageText = "";
+        let lastY = -1;
+
+        sortedY.forEach(y => {
+            // Sort items in the same line by X coordinate
+            const lineItems = lines[y].sort((a, b) => a.transform[4] - b.transform[4]);
+            const lineStr = lineItems.map(item => item.str).join(" ");
+
+            // If the jump is significant, consider it a new paragraph
+            if (lastY !== -1 && Math.abs(lastY - y) > 20) {
+                pageText += "\n";
+            }
+
+            pageText += lineStr + "\n";
+            lastY = y;
+        });
+
         fullText += pageText + "\n\n";
     }
 
