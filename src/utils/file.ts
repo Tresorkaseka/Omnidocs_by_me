@@ -72,7 +72,8 @@ import html2pdf from 'html2pdf.js';
 import { convert as convertHtmlToText } from 'html-to-text';
 
 // Set worker for pdfjs (using CDN for simplicity in Vite)
-pdfjs.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.min.js`;
+// Set worker for pdfjs (using a more robust CDN URL or local path)
+pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
 
 export async function convertDocumentLocally(file: File, targetFormat: string): Promise<Blob> {
     const extension = file.name.split('.').pop()?.toLowerCase();
@@ -182,49 +183,59 @@ async function createHighFidelityPdfFromHtml(html: string): Promise<Blob> {
 }
 
 async function extractTextFromPdf(file: File): Promise<string> {
-    const arrayBuffer = await file.arrayBuffer();
-    const loadingTask = pdfjs.getDocument({ data: arrayBuffer });
-    const pdf = await loadingTask.promise;
-    let fullText = "";
+    try {
+        console.log("PDF extraction started...");
+        const arrayBuffer = await file.arrayBuffer();
+        const loadingTask = pdfjs.getDocument({ data: arrayBuffer });
+        const pdf = await loadingTask.promise;
+        console.log(`PDF loaded. Pages: ${pdf.numPages}`);
+        let fullText = "";
 
-    for (let i = 1; i <= pdf.numPages; i++) {
-        const page = await pdf.getPage(i);
-        const textContent = await page.getTextContent();
+        for (let i = 1; i <= pdf.numPages; i++) {
+            const page = await pdf.getPage(i);
+            const textContent = await page.getTextContent();
 
-        // Group items by their Y coordinate (transform[5])
-        const items = textContent.items as any[];
-        const lines: { [key: number]: any[] } = {};
+            // Group items by their Y coordinate (transform[5])
+            const items = textContent.items as any[];
+            const lines: { [key: number]: any[] } = {};
 
-        items.forEach(item => {
-            const y = Math.round(item.transform[5]);
-            if (!lines[y]) lines[y] = [];
-            lines[y].push(item);
-        });
+            items.forEach(item => {
+                // Guard against entries that are not TextItems (like TextMark)
+                if (item && item.transform) {
+                    const y = Math.round(item.transform[5]);
+                    if (!lines[y]) lines[y] = [];
+                    lines[y].push(item);
+                }
+            });
 
-        // Sort Y coordinates descending (PDF coordinate system starts at bottom)
-        const sortedY = Object.keys(lines).map(Number).sort((a, b) => b - a);
+            // Sort Y coordinates descending (PDF coordinate system starts at bottom)
+            const sortedY = Object.keys(lines).map(Number).sort((a, b) => b - a);
 
-        let pageText = "";
-        let lastY = -1;
+            let pageText = "";
+            let lastY = -1;
 
-        sortedY.forEach(y => {
-            // Sort items in the same line by X coordinate
-            const lineItems = lines[y].sort((a, b) => a.transform[4] - b.transform[4]);
-            const lineStr = lineItems.map(item => item.str).join(" ");
+            sortedY.forEach(y => {
+                // Sort items in the same line by X coordinate
+                const lineItems = lines[y].sort((a, b) => a.transform[4] - b.transform[4]);
+                const lineStr = lineItems.map(item => item.str).join(" ");
 
-            // If the jump is significant, consider it a new paragraph
-            if (lastY !== -1 && Math.abs(lastY - y) > 20) {
-                pageText += "\n";
-            }
+                // If the jump is significant, consider it a new paragraph
+                if (lastY !== -1 && Math.abs(lastY - y) > 20) {
+                    pageText += "\n";
+                }
 
-            pageText += lineStr + "\n";
-            lastY = y;
-        });
+                pageText += lineStr + "\n";
+                lastY = y;
+            });
 
-        fullText += pageText + "\n\n";
+            fullText += pageText + "\n\n";
+        }
+        console.log("PDF extraction successful.");
+        return fullText;
+    } catch (err) {
+        console.error("CRITICAL PDF ERROR:", err);
+        throw new Error("Impossible de lire le contenu du PDF. Le fichier est peut-être protégé ou corrompu.");
     }
-
-    return fullText;
 }
 
 async function createDocxFromText(text: string): Promise<Blob> {
